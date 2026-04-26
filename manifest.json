@@ -1,0 +1,16 @@
+{
+  "name": "AFM Findings Generator – BAFS-OAD",
+  "short_name": "AFM Generator",
+  "description": "AI-assisted Assessment Findings Matrix generator for DA-BAFS Organic Agriculture Division accreditation assessments.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a2240",
+  "theme_color": "#0a2240",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' fill='%230a2240'/><text y='130' x='96' text-anchor='middle' font-size='100' fill='%23c8960c' font-family='serif'>⚖</text></svg>",
+      "sizes": "192x192",
+      "type": "image/svg+xml"
+    }
+  ]
+}

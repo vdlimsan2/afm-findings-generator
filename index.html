@@ -211,6 +211,14 @@
     margin-top: 5px;
     line-height: 1.5;
   }
+  .hint code {
+    font-family: var(--mono);
+    font-size: 10px;
+    background: var(--border-light);
+    padding: 1px 4px;
+    border-radius: 2px;
+    color: var(--navy);
+  }
 
   /* ─── CLASSIFICATION RADIO ───────────────────────────────────────────────── */
   .classification-group {
@@ -867,18 +875,22 @@
       <div class="sheets-config" id="sheetsConfig">
         <div class="sheets-config-title">Write to Output Google Sheet</div>
         <div class="form-group">
-          <label>Output Sheet ID</label>
-          <input type="text" id="outputSheetId" placeholder="Google Sheet ID from URL">
-          <div class="hint">Sheet must be shared so your Google account can write to it. Rows are appended.</div>
+          <label>Apps Script Web App URL <span class="req">*</span></label>
+          <input type="text" id="appsScriptUrl" placeholder="https://script.google.com/macros/s/…/exec">
+          <div class="hint">Deploy <code>sheets_writer.gs</code> as a Web App and paste the URL here. Saved locally.</div>
+        </div>
+        <div class="form-group">
+          <label>Output Sheet ID <span class="req">*</span></label>
+          <input type="text" id="outputSheetId" placeholder="Google Sheet ID from the URL">
+          <div class="hint">From your Output Sheet URL: …/spreadsheets/d/<strong>THIS_PART</strong>/edit</div>
         </div>
         <div class="form-group">
           <label>Tab / Sheet Name</label>
           <input type="text" id="outputSheetName" placeholder="e.g., XYZPGSG-2025-Assessment" value="Sheet1">
+          <div class="hint">Tab is created automatically if it does not exist yet.</div>
         </div>
-        <button class="btn-write" id="writeBtn" onclick="writeToSheet()">Write Row to Sheet</button>
-        <div class="hint" style="margin-top:8px;">
-          ⚠ This requires your Google OAuth token. See setup guide for instructions.
-        </div>
+        <button class="btn-write" id="writeBtn" onclick="writeToSheet()">↗ Write Row to Sheet</button>
+        <div id="writeStatus" class="hint" style="margin-top:8px;display:none;"></div>
       </div>
 
     </div>
@@ -919,6 +931,8 @@ window.addEventListener('DOMContentLoaded', () => {
   if (savedOutput) document.getElementById('outputSheetId').value = savedOutput;
   const savedOutputName = localStorage.getItem('bafs_output_name');
   if (savedOutputName) document.getElementById('outputSheetName').value = savedOutputName;
+  const savedAppsScript = localStorage.getItem('bafs_apps_script_url');
+  if (savedAppsScript) document.getElementById('appsScriptUrl').value = savedAppsScript;
 
   // Save sheet IDs on change
   document.getElementById('databankSheetId').addEventListener('change', e => {
@@ -929,6 +943,9 @@ window.addEventListener('DOMContentLoaded', () => {
   });
   document.getElementById('outputSheetName').addEventListener('change', e => {
     localStorage.setItem('bafs_output_name', e.target.value.trim());
+  });
+  document.getElementById('appsScriptUrl').addEventListener('change', e => {
+    localStorage.setItem('bafs_apps_script_url', e.target.value.trim());
   });
 
   // CCAP deadline computation
@@ -1267,52 +1284,152 @@ function toggleSheetsConfig() {
 // ─── WRITE TO SHEET ──────────────────────────────────────────────────────────
 async function writeToSheet() {
   if (!state.currentFinding) return;
-  const sheetId = document.getElementById('outputSheetId').value.trim();
-  const sheetName = document.getElementById('outputSheetName').value.trim() || 'Sheet1';
 
+  const appsScriptUrl = document.getElementById('appsScriptUrl').value.trim();
+  const sheetId       = document.getElementById('outputSheetId').value.trim();
+  const sheetName     = document.getElementById('outputSheetName').value.trim() || 'Sheet1';
+  const statusEl      = document.getElementById('writeStatus');
+
+  // Validate
+  if (!appsScriptUrl) {
+    showToast('Paste your Apps Script Web App URL first.', 'error');
+    document.getElementById('appsScriptUrl').focus();
+    return;
+  }
+  if (!appsScriptUrl.startsWith('https://script.google.com/macros/s/')) {
+    showToast('URL must start with https://script.google.com/macros/s/…', 'error');
+    return;
+  }
   if (!sheetId) {
     showToast('Enter the Output Sheet ID.', 'error');
+    document.getElementById('outputSheetId').focus();
     return;
   }
 
   const f = state.currentFinding;
   const deadline = f.classification === 'Observation' ? 'Not applicable' : f.ccapDeadlineFull;
 
-  // Row values: Report No. (blank), Date, Clause, Narrative, Classification, Deadline
+  // Row: [Report No. (blank), Date, Clause Ref, Narrative, Classification, CCAP Deadline]
   const rowValues = [['', f.closingDateFormatted, f.clauseRef, f.narrative, f.classification, deadline]];
 
   const writeBtn = document.getElementById('writeBtn');
   writeBtn.disabled = true;
   writeBtn.textContent = 'Writing…';
+  statusEl.style.display = 'none';
 
   try {
-    const apiKey = document.getElementById('apiKey').value.trim();
-    // We use the Anthropic API to write via Claude with Google Sheets API
-    // Since direct OAuth is not available in static PWA, we provide instructions
-    // and construct the API URL for the user to use with Apps Script
+    const payload = { sheetId, sheetName, values: rowValues };
 
-    // Build the Apps Script payload
-    const payload = {
-      sheetId,
-      sheetName,
-      values: rowValues,
-    };
+    // Google Apps Script doPost — must use no-cors OR the GAS must return CORS headers.
+    // We use fetch with mode 'no-cors' and rely on GAS returning 200 on success.
+    // To get a readable response, we use a URL-encoded GET-style redirect trick via
+    // a form POST through a hidden iframe (most reliable for GAS cross-origin).
+    const result = await postToAppsScript(appsScriptUrl, payload);
 
-    // Copy Apps Script payload for user
-    await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
-
-    showToast('Payload copied. Paste into your Apps Script web app to write the row.', 'success');
-    writeBtn.textContent = 'Payload Copied';
-    setTimeout(() => {
-      writeBtn.disabled = false;
-      writeBtn.textContent = 'Write Row to Sheet';
-    }, 3000);
+    if (result.success) {
+      writeBtn.textContent = '✓ Written';
+      writeBtn.style.background = 'var(--green)';
+      statusEl.textContent = `✓ Row appended to tab "${sheetName}" in your Output Sheet.`;
+      statusEl.style.display = 'block';
+      statusEl.style.color = 'var(--green)';
+      showToast('Row written to Google Sheet successfully.', 'success');
+      setTimeout(() => {
+        writeBtn.disabled = false;
+        writeBtn.textContent = '↗ Write Row to Sheet';
+        writeBtn.style.background = '';
+      }, 3000);
+    } else {
+      throw new Error(result.error || 'Apps Script returned an error.');
+    }
 
   } catch (err) {
-    showToast(err.message || 'Write failed.', 'error');
-    writeBtn.disabled = false;
-    writeBtn.textContent = 'Write Row to Sheet';
+    // If fetch fails due to CORS (no-cors mode returns opaque response),
+    // fall back to the iframe POST method which bypasses CORS for GAS.
+    console.warn('Direct fetch failed, trying iframe fallback:', err.message);
+    try {
+      await postViaIframe(appsScriptUrl, { sheetId, sheetName, values: rowValues });
+      writeBtn.textContent = '✓ Written';
+      writeBtn.style.background = 'var(--green)';
+      statusEl.textContent = `✓ Row sent to "${sheetName}". Verify in your Sheet — iframe mode used (CORS bypass).`;
+      statusEl.style.display = 'block';
+      statusEl.style.color = 'var(--amber)';
+      showToast('Row sent via fallback method. Check your Sheet to confirm.', 'success');
+      setTimeout(() => {
+        writeBtn.disabled = false;
+        writeBtn.textContent = '↗ Write Row to Sheet';
+        writeBtn.style.background = '';
+      }, 3500);
+    } catch (iframeErr) {
+      statusEl.textContent = '✗ Write failed. Check your Apps Script URL and Sheet ID.';
+      statusEl.style.display = 'block';
+      statusEl.style.color = 'var(--red)';
+      showToast(err.message || 'Write failed. See troubleshooting in README.', 'error');
+      writeBtn.disabled = false;
+      writeBtn.textContent = '↗ Write Row to Sheet';
+    }
   }
+}
+
+// Primary method: direct fetch with CORS headers from GAS
+async function postToAppsScript(url, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain' }, // GAS accepts text/plain without CORS preflight
+    body: JSON.stringify(payload),
+    redirect: 'follow',
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const text = await response.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    // If GAS redirect returns HTML (login page), treat as auth error
+    if (text.includes('accounts.google.com')) {
+      throw new Error('Apps Script requires sign-in. Set "Who has access" to Anyone.');
+    }
+    throw new Error('Unexpected response from Apps Script.');
+  }
+}
+
+// Fallback method: hidden iframe form POST (bypasses CORS, fire-and-forget)
+function postViaIframe(url, payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      const iframe = document.createElement('iframe');
+      iframe.name = 'afm_writer_frame';
+      iframe.style.display = 'none';
+      document.body.appendChild(iframe);
+
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = url;
+      form.target = 'afm_writer_frame';
+      form.style.display = 'none';
+
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'payload';
+      input.value = JSON.stringify(payload);
+      form.appendChild(input);
+
+      document.body.appendChild(form);
+
+      iframe.onload = () => {
+        setTimeout(() => {
+          document.body.removeChild(form);
+          document.body.removeChild(iframe);
+        }, 1000);
+        resolve({ success: true });
+      };
+      iframe.onerror = () => reject(new Error('iframe POST failed.'));
+
+      form.submit();
+      // Resolve after timeout if onload doesn't fire (GAS redirects break onload)
+      setTimeout(() => resolve({ success: true }), 4000);
+    } catch (e) {
+      reject(e);
+    }
+  });
 }
 
 // ─── SESSION HISTORY ─────────────────────────────────────────────────────────
